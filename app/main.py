@@ -6,3 +6,5 @@ app = FastAPI()
 app.include_router(route_gps.router)
 app.include_router(route_location.router)
 app.include_router(route_walking.router)
+
+# uvicorn app.main:app --reload

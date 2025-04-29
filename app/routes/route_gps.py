@@ -13,6 +13,8 @@ from io import BytesIO
 from typing import Optional
 from pydantic import BaseModel
 import lightgbm as lgb
+import math
+from geopy.distance import geodesic
 
 router = APIRouter()
 
@@ -228,6 +230,100 @@ def train_model_with_gps(model_data, gps_obj, G):
     new_model_bytes = pickle.dumps(save_dict)
     return new_model_bytes
 
+def generate_circle_from_start_and_direction(start, direction, radius, num_points, clockwise=True):
+    direction_angles = {
+        "E": 0,
+        "N": math.pi / 2,
+        "W": math.pi,
+        "S": 3 * math.pi / 2,
+    }
+    if direction not in direction_angles:
+        raise ValueError("direction은 'N', 'S', 'E', 'W' 중 하나여야 합니다.")
+    base_angle = direction_angles[direction]
+
+    dx = -radius * math.cos(base_angle) / 111000
+    dy = -radius * math.sin(base_angle) / 111000
+    center_lat = start[0] + dy
+    center_lon = start[1] + dx / math.cos(math.radians(start[0]))
+    center = (center_lat, center_lon)
+
+    waypoints = []
+    for i in range(num_points):
+        angle = base_angle + (2 * math.pi * i / num_points) * (-1 if clockwise else 1)
+        dx = radius * math.cos(angle) / 111000
+        dy = radius * math.sin(angle) / 111000
+        lat = center[0] + dy
+        lon = center[1] + dx / math.cos(math.radians(center[0]))
+        waypoints.append((lat, lon))
+
+    waypoints = rotate_waypoints_to_start_nearest(waypoints, start)
+    return waypoints + [waypoints[0]]  # 순환 루프
+
+def rotate_waypoints_to_start_nearest(waypoints, start):
+    dists = [((lat - start[0])**2 + (lon - start[1])**2, i) for i, (lat, lon) in enumerate(waypoints)]
+    _, start_idx = min(dists)
+    return waypoints[start_idx:] + waypoints[:start_idx]
+
+def build_route_with_optional_waypoints(G, start_point, direction, radius, num_points, extra_waypoints=None):
+    full_waypoints = generate_circle_from_start_and_direction(start_point, direction, radius, num_points)
+
+    if extra_waypoints:
+        full_waypoints += extra_waypoints  # 사용자 지정 경유지 추가
+
+    # 경유지를 가장 가까운 그래프 노드로 매핑
+    nodes = [ox.nearest_nodes(G, X=lon, Y=lat) for lat, lon in full_waypoints]
+
+    # 노드들을 순서대로 shortest path 연결
+    route = []
+    for i in range(len(nodes) - 1):
+        segment = nx.shortest_path(G, nodes[i], nodes[i + 1], weight='length')
+        if route:
+            route.extend(segment[1:])  # 중복 제거
+        else:
+            route.extend(segment)
+    
+    return route
+
+def get_max_distance_from_start(p1, p2):
+    return geodesic(p1, p2).meters
+
+
+def fetch_graph_for_radius(start_point, extra_waypoints=None, radius_list=None):
+    """
+    그래프를 한 번만 생성하고, 경유지가 있으면 그에 맞게 반지름을 조정한 후 그래프를 반환합니다.
+    """
+    if extra_waypoints:
+        # 경유지가 있으면 최대 거리 기준으로 반지름 설정
+        d_max = get_max_distance_from_start(start_point, extra_waypoints)
+        radius_list = [d_max]  # 경유지가 있으면 단일 반지름
+        fetch_radius = d_max + 500  # 그래프 확보 거리
+    else:
+        # 경유지가 없으면 최대 반지름 기준으로 그래프 확보
+        fetch_radius = max(radius_list) + 500  # 최대 반지름 기반으로 그래프 확보
+    
+    return ox.graph_from_point(start_point, dist=fetch_radius, dist_type="network", network_type="walk")
+
+
+def generate_all_routes(G, start_point, radius_list, directions, extra_waypoints):
+    """
+    주어진 반지름과 방향을 사용하여 모든 경로를 생성하여 반환합니다.
+    """
+    all_routes = []  # 모든 경로 저장
+    num_points = 8
+
+    for radius in radius_list:
+        for direction in directions:
+            route = build_route_with_optional_waypoints(
+                G, start_point, direction, radius, num_points, extra_waypoints=extra_waypoints
+            )
+            all_routes.append(route)  # 저장
+            print(f"🌀 반지름: {radius:.1f}m | 방향: {direction} | 경유지 포함 여부: {'O' if extra_waypoints else 'X'}")
+    
+    return all_routes
+
+
+
+
 @router.post("/train_model")
 async def train_model(
     model: UploadFile = File(...),
@@ -274,21 +370,62 @@ async def train_model(
 async def recommend_route(
     json_str: str = Form(...), 
     model_file: UploadFile = File(...)):
-    # Parse the JSON string
+
     try:
         route_data = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        return {"error": f"JSON Decode Error: {e}"}
+        
+        # start_location을 JSON에서 추출
+        start_point = route_data.get("start_location")
+        if not start_point:
+            return {"error": "start_point is missing in the input JSON"}
+        
+        latitude = start_point.get("latitude")
+        longitude = start_point.get("longitude")
 
-    # Process the model file
-    try:
-        model_bytes = await model_file.read()
-        model = pickle.loads(model_bytes)
-    except Exception as e:
-        return {"error": f"Error loading model: {e}"}
+        # print(latitude, longitude) # 시작점 쳌~
 
-    # Now, you can use the parsed route data and model to recommend a route.
-    # For now, we'll just return the parsed data as an example.
-    return route_data
+        # latitude, longitude 값이 없는 경우 처리
+        if latitude is None or longitude is None:
+            return {"error": "start_point must contain both 'latitude' and 'longitude'."}
+        try:
+            # start_point을 tuple로 변환
+            start_location = (float(latitude), float(longitude))
+        except ValueError:
+            return {"error": "Invalid latitude or longitude. Ensure both are valid numbers."}
     
 
+    except Exception as e:
+        return {"error": f"Error processing start_location: {e}"}
+
+    try:
+        # 모델 파일 로딩
+        model_bytes = await model_file.read()
+        model = pickle.loads(model_bytes)
+        
+    except Exception as e:
+        return {"error": f"Error loading model: {e}"}
+    
+    radius_list = [100, 200]
+    directions = ['N', 'E', 'S', 'W']
+    extra_waypoints = [
+        # (37.552882, 126.922893)
+    ] 
+
+    # 그래프 생성
+    G = fetch_graph_for_radius(start_location, extra_waypoints=extra_waypoints, radius_list=radius_list)
+
+    # 경로 생성
+    all_routes = generate_all_routes(G, start_location, radius_list, directions, extra_waypoints)
+    
+    for idx, route in enumerate(all_routes):
+        total_length = 0
+        for i in range(len(route) - 1):
+            u = route[i]
+            v = route[i + 1]
+            edge_data = G.get_edge_data(u, v)
+            length = edge_data[0]['length'] if isinstance(edge_data, dict) else edge_data['length']
+            total_length += length
+        print(f"경로 {idx + 1}의 총 거리: {total_length:.2f} meters")
+
+
+    return all_routes
