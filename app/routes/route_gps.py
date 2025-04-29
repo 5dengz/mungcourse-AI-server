@@ -289,8 +289,6 @@ async def recommend_route(
 
     # Now, you can use the parsed route data and model to recommend a route.
     # For now, we'll just return the parsed data as an example.
-    return {
-        "route_data": route_data,
-        "model_info": str(model),  # Return a summary of the model (or use it for predictions)
-    }
+    return route_data
+    
 
