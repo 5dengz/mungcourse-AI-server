@@ -1,9 +1,9 @@
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 from datetime import datetime
+from fastapi import UploadFile, File
 
-class Location(BaseModel): # 이건 예시용 이긴 함
-    place_name: str
+class Location(BaseModel): 
     latitude: float
     longitude: float
 
@@ -12,11 +12,10 @@ class Gps(BaseModel): # 단일 GPS값
     lon: float
 
 class GpsList(BaseModel): # GPS리스트, 한개의 완전한 루트
-    get_list: List[Gps]
+    gps_list: List[Gps]
+    label: Optional[float] = None  # label 필드 추가, 기본값은 None
 
-class WalkingRoute(BaseModel): # 간단한 라우팅용 함수 : 출발지, 도착지, 경유지, 걸리는시간, 만들어진시간.
+class WalkingRoute(BaseModel): # 산책로 추천 요청받을 포맷
     start_location: Location
-    end_location: Location
     waypoints: List[Location] = []
-    travel_time: int
-    created_at: datetime = Field(default_factory=datetime.now)
+    model_file: UploadFile = File(...)  # pkl 파일을 받는 필드
