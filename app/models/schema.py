@@ -14,8 +14,3 @@ class Gps(BaseModel): # 단일 GPS값
 class GpsList(BaseModel): # GPS리스트, 한개의 완전한 루트
     gps_list: List[Gps]
     label: Optional[float] = None  # label 필드 추가, 기본값은 None
-
-class WalkingRoute(BaseModel): # 산책로 추천 요청받을 포맷
-    start_location: Location
-    waypoints: List[Location] = []
-    model_file: UploadFile = File(...)  # pkl 파일을 받는 필드
