@@ -155,28 +155,66 @@ def predict_and_rank_routes(
     
     return ranked_routes
 
-def convert_all_routes_to_latlon(G, ranked_routes):
+def convert_routes_with_latlng_to_json(routes_with_length, G):
     """
-    G: osmnx MultiDiGraph
-    ranked_routes: [{"route": [...], "score": ...}, ...] 형식의 리스트
-    return: [[(lat, lon), ...], ...] 형태의 리스트 (score 제거됨)
+    routes_with_length 내 각 route의 node ID를 lat/lng로 변환하고 JSON 파싱
+
+    Parameters:
+        routes_with_length (list): [{'route': [node_ids], 'route_length': float}]
+        G (networkx.MultiDiGraph): OSMnx로 생성된 그래프
+
+    Returns:
+        str: JSON 문자열 (list of dicts with lat/lng and route_length)
     """
-    latlon_routes = []
+    result = []
+
+    for route_info in routes_with_length:
+        route = route_info['route']
+        route_length = route_info['route_length']
+        latlng_route = []
+
+        for node in route:
+            node_data = G.nodes[node]
+            latlng_route.append({'lat': node_data['y'], 'lng': node_data['x']})
+
+        result.append({
+            'route': latlng_route,
+            'route_length': route_length
+        })
+
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+def calculate_routes_length(routes_with_scores, G):
+    """
+    각 route의 거리(route_length)를 계산해 반환하는 함수.
+    score는 제외되고, route와 route_length만 포함됨.
     
-    for item in ranked_routes:
-        node_route = item["route"]
-        latlon_route = []
-        
-        for node in node_route:
-            if node in G.nodes:
-                node_data = G.nodes[node]
-                latlon_route.append((node_data['y'], node_data['x']))  # (lat, lon)
-            else:
-                print(f"Warning: node {node} not found in graph.")
-        
-        latlon_routes.append(latlon_route)
-    
-    return latlon_routes
+    Parameters:
+        routes_with_scores (list): [{'route': [...], 'score': ...}, ...]
+        G (networkx.MultiDiGraph): 거리 정보를 포함한 그래프
+
+    Returns:
+        list: [{'route': [...], 'route_length': float}, ...]
+    """
+    updated_routes = []
+
+    for route_obj in routes_with_scores:
+        route = route_obj["route"]
+        total_length = 0
+
+        for i in range(len(route) - 1):
+            u = route[i]
+            v = route[i + 1]
+            edge_data = G.get_edge_data(u, v)
+            length = edge_data[0]['length'] if isinstance(edge_data, dict) and 0 in edge_data else edge_data['length']
+            total_length += length
+
+        updated_routes.append({
+            "route": route,
+            "route_length": total_length
+        })
+
+    return updated_routes
 
 
 @router.post("/recommend_route")
@@ -253,15 +291,14 @@ async def recommend_route(
             total_length += length
         print(f"경로 {idx + 1}의 총 거리: {total_length:.2f} meters")
 
-
-    # 예시: 경로 데이터 (all_routes), 모델 (model), name_encoder 준비
+    # 루트들 순위매기기
     ranked_routes = predict_and_rank_routes(G, all_routes, model, name_encoder, build_route_feature_dataframe)
-    print(ranked_routes)
 
-    latlon_routes = convert_all_routes_to_latlon(G, ranked_routes)
+    # 각 루트 길이값 추가하기
+    ranked_routes_with_length = calculate_routes_length(ranked_routes, G)
 
-    # 상위 5개 경로 출력
-    for i, route in enumerate(ranked_routes[:5], 1):
-        print(f"{i}위 경로: {route['route']} 점수: {route['score']}")
+    # lat,lng 형태 & json 형태로 바꾸기
+    json_routes = convert_routes_with_latlng_to_json(ranked_routes_with_length, G)
+    print(json_routes)
 
-    return latlon_routes
+    return json_routes

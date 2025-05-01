@@ -16,6 +16,8 @@ import lightgbm as lgb
 import math
 from geopy.distance import geodesic
 from lightgbm import Booster
+import json
+
 
 router = APIRouter()
 
