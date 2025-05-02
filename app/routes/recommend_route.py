@@ -41,7 +41,12 @@ def build_route_with_optional_waypoints(G, start_point, direction, radius, num_p
     full_waypoints = generate_circle_from_start_and_direction(start_point, direction, radius, num_points)
 
     if extra_waypoints:
-        full_waypoints += extra_waypoints  # 사용자 지정 경유지 추가
+        # dict -> (lat, lon) 튜플로 변환
+        converted_waypoints = [
+            (wp["latitude"], wp["longitude"]) if isinstance(wp, dict) else wp
+            for wp in extra_waypoints
+        ]
+        full_waypoints += converted_waypoints
 
     # 경유지를 가장 가까운 그래프 노드로 매핑
     nodes = [ox.nearest_nodes(G, X=lon, Y=lat) for lat, lon in full_waypoints]
@@ -57,8 +62,8 @@ def build_route_with_optional_waypoints(G, start_point, direction, radius, num_p
     
     return route
 
-def get_max_distance_from_start(p1, p2):
-    return geodesic(p1, p2).meters
+def get_max_distance_from_start(p1, points):
+    return max(geodesic(p1, p2).meters for p2 in points)
 
 
 def fetch_graph_for_radius(start_point, extra_waypoints=None, radius_list=None):
@@ -233,6 +238,17 @@ async def recommend_route(
         latitude = start_point.get("latitude")
         longitude = start_point.get("longitude")
 
+        # wayponit들의 배열인 waypoints JSON에서 추출
+        extra_waypoints = route_data.get("waypoints")
+
+        waypoints = []
+        for point in extra_waypoints:
+            lat = point.get("latitude")
+            lon = point.get("longitude")
+            if lat is not None and lon is not None:
+                waypoints.append((lat, lon))
+
+
         # print(latitude, longitude) # 시작점 쳌~
 
         # latitude, longitude 값이 없는 경우 처리
@@ -258,7 +274,7 @@ async def recommend_route(
         # name_encoder가 포함된 경우만 처리
         name_encoder = model_data.get('name_encoder', None)
         if name_encoder is not None:
-            print("\n📌 name_encoder 내용:")
+            print("\n name_encoder 내용:")
             if hasattr(name_encoder, 'classes_'):
                 print("LabelEncoder 클래스 목록:", name_encoder.classes_)
             else:
@@ -271,12 +287,9 @@ async def recommend_route(
     
     radius_list = [100, 200]
     directions = ['N', 'E', 'S', 'W']
-    extra_waypoints = [
-        # (37.552882, 126.922893)
-    ] 
 
     # 그래프 생성
-    G = fetch_graph_for_radius(start_location, extra_waypoints=extra_waypoints, radius_list=radius_list)
+    G = fetch_graph_for_radius(start_location, extra_waypoints=waypoints, radius_list=radius_list)
 
     # 경로 생성
     all_routes = generate_all_routes(G, start_location, radius_list, directions, extra_waypoints)

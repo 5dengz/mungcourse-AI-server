@@ -24,3 +24,4 @@ htmlcov/
 
 # Pydantic cache
 .mypy_cache/
+cache/
