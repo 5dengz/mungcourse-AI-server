@@ -25,12 +25,12 @@ def gps_to_route(G, gps_coords):
     """
     GPS 좌표 리스트를 받아 OSMnx 그래프 상의 경로를 생성합니다.
     :param G: OSMnx 그래프
-    :param gps_coords: (lat, lon) 형식의 좌표 리스트
+    :param gps_coords: (lat, lng) 형식의 좌표 리스트
     :return: 경로에 포함된 노드 ID 리스트
     """
     # Step 1: 각 GPS 좌표 → 가장 가까운 노드로 매핑
     node_ids = [
-        ox.distance.nearest_nodes(G, X=float(coord["lon"]), Y=float(coord["lat"]))  # 'lat'과 'lon' 값 접근
+        ox.distance.nearest_nodes(G, X=float(coord["lng"]), Y=float(coord["lat"]))  # 'lat'과 'lng' 값 접근
         for coord in gps_coords
     ]
     
@@ -257,8 +257,8 @@ async def train_model(
         gps_obj_list = json.loads(json_str)
 
         # 첫 번째 GPS 객체의 첫 번째 좌표를 기준으로 그래프 생성
-        lat, lon = gps_obj_list[0]["gps_list"][0]["lat"], gps_obj_list[0]["gps_list"][0]["lon"]
-        G = ox.graph_from_point((lat, lon), dist=1000, network_type='walk')
+        lat, lng = gps_obj_list[0]["gps_list"][0]["lat"], gps_obj_list[0]["gps_list"][0]["lng"]
+        G = ox.graph_from_point((lat, lng), dist=2000, network_type='walk')
 
         trained_model_bytes = train_model_with_gps(model_data, gps_obj_list, G)
 
