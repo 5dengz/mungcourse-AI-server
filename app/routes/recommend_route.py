@@ -221,6 +221,34 @@ def calculate_routes_length(routes_with_scores, G):
 
     return updated_routes
 
+# 두 점 사이의 일정 간격으로 GPS 좌표를 보간하는 함수
+def interpolate_route(nodes, G, interval=10):
+    interpolated_coords = []
+    
+    for i in range(len(nodes) - 1):
+        node1 = nodes[i]
+        node2 = nodes[i + 1]
+        
+        lat1, lon1 = G.nodes[node1]['y'], G.nodes[node1]['x']
+        lat2, lon2 = G.nodes[node2]['y'], G.nodes[node2]['x']
+        
+        start_point = (lat1, lon1)
+        end_point = (lat2, lon2)
+        distance = geodesic(start_point, end_point).meters
+        
+        num_points = int(distance // interval)
+        if num_points == 0:
+            num_points = 1  # 최소한 한 개는 보간
+        
+        for j in range(num_points + 1):
+            fraction = j / num_points
+            interp_lat = lat1 + (lat2 - lat1) * fraction
+            interp_lon = lon1 + (lon2 - lon1) * fraction
+            interpolated_coords.append((interp_lat, interp_lon))
+    
+    return interpolated_coords
+
+
 
 @router.post("/recommend_route")
 async def recommend_route(
@@ -309,9 +337,28 @@ async def recommend_route(
 
     # 각 루트 길이값 추가하기
     ranked_routes_with_length = calculate_routes_length(ranked_routes, G)
+    print(ranked_routes_with_length)
+    
+    # 각 경로에 대해 촘촘한 GPS 좌표 생성
+    interpolated_routes = []
+
+    for route in ranked_routes_with_length:
+        nodes = route['route']
+        route_length = route['route_length']
+        
+        # 각 경로의 노드들에 대해 GPS 좌표 보간
+        interpolated_coords = interpolate_route(nodes, G, interval=200)  # interval m 간격으로 보간
+        interpolated_routes.append({'route': interpolated_coords, 'route_length': route_length})
+    # print(interpolated_routes)
+    
+    # # 결과 출력 (첫 번째 경로의 보간된 GPS 좌표들)
+    # for i, interpolated_route in enumerate(interpolated_routes):
+    #     print(f"Route {i + 1} interpolated coordinates:")
+    #     for coord in interpolated_route['route']:
+    #         print(coord)
 
     # lat,lng 형태 & json 형태로 바꾸기
     json_routes = convert_routes_with_latlng_to_json(ranked_routes_with_length, G)
-    print(json_routes)
+    # print(json_routes)
 
-    return json_routes
+    return interpolated_routes
