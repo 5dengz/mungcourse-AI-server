@@ -17,6 +17,8 @@ import math
 from geopy.distance import geodesic
 from lightgbm import Booster
 import json
+from shapely.geometry import LineString
+from shapely.geometry import Point
 
 
 router = APIRouter()

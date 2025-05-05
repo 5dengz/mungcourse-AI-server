@@ -37,21 +37,42 @@ def rotate_waypoints_to_start_nearest(waypoints, start):
     _, start_idx = min(dists)
     return waypoints[start_idx:] + waypoints[:start_idx]
 
+def insert_waypoints_by_proximity(base_waypoints, extra_waypoints):
+    """
+    extra_waypoints를 base_waypoints 중 가장 가까운 지점 뒤에 삽입
+    """
+    updated = base_waypoints[:]
+    for wp in extra_waypoints:
+        wp_point = Point(wp)
+        min_dist = float('inf')
+        insert_idx = len(updated)  # 기본은 마지막
+
+        for i, base_wp in enumerate(updated):
+            dist = Point(base_wp).distance(wp_point)
+            if dist < min_dist:
+                min_dist = dist
+                insert_idx = i + 1  # 바로 뒤에 삽입
+
+        updated.insert(insert_idx, wp)
+    return updated
+
+
 def build_route_with_optional_waypoints(G, start_point, direction, radius, num_points, extra_waypoints=None):
     full_waypoints = generate_circle_from_start_and_direction(start_point, direction, radius, num_points)
 
     if extra_waypoints:
-        # dict -> (lat, lon) 튜플로 변환
+        # dict → (lat, lon) 튜플 변환
         converted_waypoints = [
             (wp["latitude"], wp["longitude"]) if isinstance(wp, dict) else wp
             for wp in extra_waypoints
         ]
-        full_waypoints += converted_waypoints
+        # 경유지를 원형 경유지 사이에 자연스럽게 삽입
+        full_waypoints = insert_waypoints_by_proximity(full_waypoints, converted_waypoints)
 
-    # 경유지를 가장 가까운 그래프 노드로 매핑
+    # 위경도 → 노드 ID 매핑
     nodes = [ox.nearest_nodes(G, X=lon, Y=lat) for lat, lon in full_waypoints]
 
-    # 노드들을 순서대로 shortest path 연결
+    # 노드들을 shortest path로 연결
     route = []
     for i in range(len(nodes) - 1):
         segment = nx.shortest_path(G, nodes[i], nodes[i + 1], weight='length')
@@ -59,7 +80,7 @@ def build_route_with_optional_waypoints(G, start_point, direction, radius, num_p
             route.extend(segment[1:])  # 중복 제거
         else:
             route.extend(segment)
-    
+
     return route
 
 def get_max_distance_from_start(p1, points):
@@ -160,13 +181,14 @@ def predict_and_rank_routes(
     
     return ranked_routes
 
-def convert_routes_with_latlng_to_json(routes_with_length, G):
+import json
+
+def convert_routes_to_json(routes_with_length):
     """
-    routes_with_length 내 각 route의 node ID를 lat/lng로 변환하고 JSON 파싱
+    [lat, lon] 형식의 좌표를 포함한 route 데이터를 JSON 문자열로 변환
 
     Parameters:
-        routes_with_length (list): [{'route': [node_ids], 'route_length': float}]
-        G (networkx.MultiDiGraph): OSMnx로 생성된 그래프
+        routes_with_length (list): [{'route': [[lat, lon], ...], 'route_length': float}]
 
     Returns:
         str: JSON 문자열 (list of dicts with lat/lng and route_length)
@@ -178,16 +200,16 @@ def convert_routes_with_latlng_to_json(routes_with_length, G):
         route_length = route_info['route_length']
         latlng_route = []
 
-        for node in route:
-            node_data = G.nodes[node]
-            latlng_route.append({'lat': node_data['y'], 'lng': node_data['x']})
+        for lat, lon in route:
+            latlng_route.append({'lat': lat, 'lng': lon})
 
         result.append({
             'route': latlng_route,
-            'route_length': route_length
+            'route_length': float(route_length)  # np.float64도 처리 가능
         })
 
     return json.dumps(result, ensure_ascii=False, indent=2)
+
 
 def calculate_routes_length(routes_with_scores, G):
     """
@@ -221,6 +243,43 @@ def calculate_routes_length(routes_with_scores, G):
 
     return updated_routes
 
+def save_route_lat_lon(G, route_list):
+    all_routes_lat_lon = []
+
+    for idx, route_data in enumerate(route_list):
+        route = route_data['route']
+        route_length = route_data['route_length']
+        route_lat_lon = []
+        route_geometries = []
+
+        # 인접 노드 쌍으로 geometry 생성
+        for u, v in zip(route[:-1], route[1:]):
+            edge_data = G.get_edge_data(u, v)
+            if edge_data is None:
+                continue  # edge가 없으면 skip
+            edge = list(edge_data.values())[0]
+            if 'geometry' in edge:
+                geom = edge['geometry']
+            else:
+                point_u = (G.nodes[u]['x'], G.nodes[u]['y'])
+                point_v = (G.nodes[v]['x'], G.nodes[v]['y'])
+                geom = LineString([point_u, point_v])
+            route_geometries.append(geom)
+
+        # geometry를 통해 lat, lon 좌표 추출
+        for geom in route_geometries:
+            for lon, lat in geom.coords:
+                route_lat_lon.append([lat, lon])
+
+        # 라우트 결과 저장
+        route_result = {
+            'route': route_lat_lon,
+            'route_length': route_length
+        }
+        all_routes_lat_lon.append(route_result)
+
+    return all_routes_lat_lon
+
 
 @router.post("/recommend_route")
 async def recommend_route(
@@ -248,8 +307,6 @@ async def recommend_route(
             if lat is not None and lon is not None:
                 waypoints.append((lat, lon))
 
-
-        # print(latitude, longitude) # 시작점 쳌~
 
         # latitude, longitude 값이 없는 경우 처리
         if latitude is None or longitude is None:
@@ -309,9 +366,11 @@ async def recommend_route(
 
     # 각 루트 길이값 추가하기
     ranked_routes_with_length = calculate_routes_length(ranked_routes, G)
+    
+    # gps로 바꾸면서 루트 이쁘게 보간/조정
+    latlon_routes = save_route_lat_lon(G, ranked_routes_with_length)
+    
+    # json 형태로 바꾸기
+    json_routes = convert_routes_to_json(latlon_routes)
 
-    # lat,lng 형태 & json 형태로 바꾸기
-    json_routes = convert_routes_with_latlng_to_json(ranked_routes_with_length, G)
-    print(json_routes)
-
-    return json_routes
+    return json_routes 
