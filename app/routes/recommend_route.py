@@ -1,9 +1,11 @@
 from fastapi import APIRouter
 from app.routes.train_model import *
+import random
+from shapely.geometry import LineString, Point
 
 router = APIRouter()
 
-def generate_circle_from_start_and_direction(start, direction, radius, num_points, clockwise=True):
+def generate_circle_from_start_and_direction(start, direction, radius, num_points, G, clockwise=True):
     direction_angles = {
         "E": 0,
         "N": math.pi / 2,
@@ -27,7 +29,9 @@ def generate_circle_from_start_and_direction(start, direction, radius, num_point
         dy = radius * math.sin(angle) / 111000
         lat = center[0] + dy
         lon = center[1] + dx / math.cos(math.radians(center[0]))
-        waypoints.append((lat, lon))
+        # 도로 위로 스냅핑
+        snapped_lat, snapped_lon = snap_point_to_edge(G, lat, lon)
+        waypoints.append((snapped_lat, snapped_lon))
 
     waypoints = rotate_waypoints_to_start_nearest(waypoints, start)
     return waypoints + [waypoints[0]]  # 순환 루프
@@ -56,9 +60,25 @@ def insert_waypoints_by_proximity(base_waypoints, extra_waypoints):
         updated.insert(insert_idx, wp)
     return updated
 
+def snap_point_to_edge(G, lat, lon):
+    # 1. 가장 가까운 edge 찾기
+    u, v, key = ox.nearest_edges(G, lon, lat, return_dist=False)
+    edge_data = G.get_edge_data(u, v)[key]
+    # 2. edge의 geometry 가져오기
+    if 'geometry' in edge_data:
+        line: LineString = edge_data['geometry']
+    else:
+        # geometry가 없으면 단순 직선
+        line = LineString([(G.nodes[u]['x'], G.nodes[u]['y']), (G.nodes[v]['x'], G.nodes[v]['y'])])
+    # 3. 입력 점을 shapely Point로
+    pt = Point(lon, lat)
+    # 4. 도로 위에서 가장 가까운 점 계산
+    snapped_point = line.interpolate(line.project(pt))
+    # 5. (lat, lon) 반환 (shapely는 (x, y) = (lon, lat))
+    return (snapped_point.y, snapped_point.x)
 
 def build_route_with_optional_waypoints(G, start_point, direction, radius, num_points, extra_waypoints=None):
-    full_waypoints = generate_circle_from_start_and_direction(start_point, direction, radius, num_points)
+    full_waypoints = generate_circle_from_start_and_direction(start_point, direction, radius, num_points, G)
 
     if extra_waypoints:
         # dict → (lat, lon) 튜플 변환
@@ -280,6 +300,19 @@ def save_route_lat_lon(G, route_list):
 
     return all_routes_lat_lon
 
+def apply_avoid_points_to_graph(G, avoid_points, radius=30):
+    for lat, lon in avoid_points:
+        # 반경 내 모든 노드 찾기
+        nodes_within_radius = [
+            n for n, data in G.nodes(data=True)
+            if geodesic((data['y'], data['x']), (lat, lon)).meters < radius
+        ]
+        # 해당 노드의 모든 엣지 가중치 증가
+        for n in nodes_within_radius:
+            for neighbor in G.neighbors(n):
+                for key in G[n][neighbor]:
+                    G[n][neighbor][key]['length'] = 1e6  # 매우 큰 값으로 설정
+    return G
 
 @router.post("/recommend_route")
 async def recommend_route(
@@ -288,69 +321,64 @@ async def recommend_route(
 
     try:
         route_data = json.loads(json_str)
-        
-        # start_location을 JSON에서 추출
         start_point = route_data.get("start_location")
         if not start_point:
             return {"error": "start_point is missing in the input JSON"}
-        
         latitude = start_point.get("latitude")
         longitude = start_point.get("longitude")
-
-        # wayponit들의 배열인 waypoints JSON에서 추출
         extra_waypoints = route_data.get("waypoints")
-
         waypoints = []
-        for point in extra_waypoints:
+        for point in extra_waypoints or []:
             lat = point.get("latitude")
             lon = point.get("longitude")
             if lat is not None and lon is not None:
                 waypoints.append((lat, lon))
-
-
-        # latitude, longitude 값이 없는 경우 처리
         if latitude is None or longitude is None:
             return {"error": "start_point must contain both 'latitude' and 'longitude'."}
         try:
-            # start_point을 tuple로 변환
             start_location = (float(latitude), float(longitude))
         except ValueError:
             return {"error": "Invalid latitude or longitude. Ensure both are valid numbers."}
-    
-
     except Exception as e:
         return {"error": f"Error processing start_location: {e}"}
 
     try:
-        # 모델 파일 로딩
         model_bytes = await model_file.read()
         model_data = pickle.loads(model_bytes)
-
         model = model_data['model']
-
-        # name_encoder가 포함된 경우만 처리
         name_encoder = model_data.get('name_encoder', None)
-        if name_encoder is not None:
-            print("\n name_encoder 내용:")
-            if hasattr(name_encoder, 'classes_'):
-                print("LabelEncoder 클래스 목록:", name_encoder.classes_)
-            else:
-                print(name_encoder)
-        else:
-            print("\nname_encoder 없음. 해당 항목은 제공되지 않았습니다.")
-
     except Exception as e:
         return {"error": f"Error loading model: {e}"}
-    
+
+    # 원형 점 기반 경로 생성 파라미터 복구
     radius_list = [100, 200]
     directions = ['N', 'E', 'S', 'W']
+    # smoking_zones를 요청에서 받아서 동적으로 적용
+    smoking_zones_input = route_data.get("smoking_zones")
+    if smoking_zones_input is None:
+        smoking_zones = []
+    elif isinstance(smoking_zones_input, list) and len(smoking_zones_input) == 0:
+        smoking_zones = []
+    else:
+        smoking_zones = []
+        for point in smoking_zones_input:
+            if isinstance(point, dict):
+                lat = point.get("latitude")
+                lon = point.get("longitude")
+            elif isinstance(point, (list, tuple)) and len(point) == 2:
+                lat, lon = point
+            else:
+                continue
+            if lat is not None and lon is not None:
+                smoking_zones.append((lat, lon))
 
     # 그래프 생성
     G = fetch_graph_for_radius(start_location, extra_waypoints=waypoints, radius_list=radius_list)
+    G = apply_avoid_points_to_graph(G, smoking_zones, radius=30)
 
-    # 경로 생성
-    all_routes = generate_all_routes(G, start_location, radius_list, directions, extra_waypoints)
-    
+    # 원형 점 기반 경로 후보 생성
+    all_routes = generate_all_routes(G, start_location, radius_list, directions, extra_waypoints=waypoints)
+
     for idx, route in enumerate(all_routes):
         total_length = 0
         for i in range(len(route) - 1):
@@ -363,14 +391,10 @@ async def recommend_route(
 
     # 루트들 순위매기기
     ranked_routes = predict_and_rank_routes(G, all_routes, model, name_encoder, build_route_feature_dataframe)
-
     # 각 루트 길이값 추가하기
     ranked_routes_with_length = calculate_routes_length(ranked_routes, G)
-    
     # gps로 바꾸면서 루트 이쁘게 보간/조정
     latlon_routes = save_route_lat_lon(G, ranked_routes_with_length)
-    
     # json 형태로 바꾸기
     json_routes = convert_routes_to_json(latlon_routes)
-
     return json_routes 
