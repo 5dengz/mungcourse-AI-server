@@ -301,18 +301,29 @@ def save_route_lat_lon(G, route_list):
     return all_routes_lat_lon
 
 def apply_avoid_points_to_graph(G, avoid_points, radius=30):
+    """
+    흡연 구역 반경 내 노드 자체를 그래프에서 제거하여 해당 구역을 완전히 우회하도록 합니다.
+    Args:
+        G (networkx.MultiDiGraph): 도로 네트워크 그래프
+        avoid_points (list): 회피할 지점들의 (lat, lon) 좌표 리스트
+        radius (float): 회피 반경 (미터)
+    Returns:
+        networkx.MultiDiGraph: 수정된 그래프
+    """
+    G_modified = G.copy()
+    nodes_to_remove = set()
     for lat, lon in avoid_points:
-        # 반경 내 모든 노드 찾기
         nodes_within_radius = [
-            n for n, data in G.nodes(data=True)
+            n for n, data in G_modified.nodes(data=True)
             if geodesic((data['y'], data['x']), (lat, lon)).meters < radius
         ]
-        # 해당 노드의 모든 엣지 가중치 증가
-        for n in nodes_within_radius:
-            for neighbor in G.neighbors(n):
-                for key in G[n][neighbor]:
-                    G[n][neighbor][key]['length'] = 1e6  # 매우 큰 값으로 설정
-    return G
+        print(f"흡연 구역 ({lat}, {lon}) 주변 {len(nodes_within_radius)}개의 노드 발견")
+        nodes_to_remove.update(nodes_within_radius)
+    print(f"총 {len(nodes_to_remove)}개의 노드가 제거됩니다.")
+    G_modified.remove_nodes_from(nodes_to_remove)
+    print(f"수정 후 그래프 노드 수: {G_modified.number_of_nodes()}")
+    print(f"수정 후 그래프 엣지 수: {G_modified.number_of_edges()}")
+    return G_modified
 
 @router.post("/recommend_route")
 async def recommend_route(
@@ -372,9 +383,19 @@ async def recommend_route(
             if lat is not None and lon is not None:
                 smoking_zones.append((lat, lon))
 
+    print(f"처리할 흡연 구역 수: {len(smoking_zones)}")
+    for lat, lon in smoking_zones:
+        print(f"흡연 구역 좌표: ({lat}, {lon})")
+
     # 그래프 생성
     G = fetch_graph_for_radius(start_location, extra_waypoints=waypoints, radius_list=radius_list)
-    G = apply_avoid_points_to_graph(G, smoking_zones, radius=30)
+    print(f"원본 그래프 노드 수: {G.number_of_nodes()}")
+    print(f"원본 그래프 엣지 수: {G.number_of_edges()}")
+    
+    # 흡연 구역 적용
+    G = apply_avoid_points_to_graph(G, smoking_zones, radius=50)
+    print(f"수정 후 그래프 노드 수: {G.number_of_nodes()}")
+    print(f"수정 후 그래프 엣지 수: {G.number_of_edges()}")
 
     # 원형 점 기반 경로 후보 생성
     all_routes = generate_all_routes(G, start_location, radius_list, directions, extra_waypoints=waypoints)
